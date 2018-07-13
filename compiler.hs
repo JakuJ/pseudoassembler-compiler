@@ -6,6 +6,8 @@ import Data.Char (isSpace, isDigit, isUpper)
 import Control.Monad
 import Control.Applicative
 import Data.List
+import Data.Maybe (fromJust)
+import System.Process (callProcess)
 import Parser
 
 -- LEXING: First pass
@@ -98,7 +100,12 @@ data AddressNode =    RegisterNode Int
                     | LabelNode String
                     | AbsoluteNode Int
                     | RelativeNode Int Int 
-                        deriving (Show)
+
+instance Show AddressNode where
+    show (RegisterNode i) = "registers[" ++ show i ++ "]"
+    show (LabelNode s) = "memory[" ++ s ++ "]"
+    show (AbsoluteNode i) = "memory[" ++ show ((i - 1000) `div` 4) ++ "]"
+    show (RelativeNode off r) = "memory[(registers[" ++ show r ++ "] - 1000 + " ++ show (off `div` 4) ++ ") / 4]"
 -- BASIC PARSERS
 
 parseLabel :: Parser Token String
@@ -149,22 +156,20 @@ parseAddress = parseRelativeNode <|> parseRegisterNode <|> parseAbsoluteNode <|>
 
 parseDeclaration :: Parser Token Tree
 parseDeclaration = do
-    l <- parseLabel
     _ <- parseKeyword "DS"
     s <- (parseOffset >>= \x -> parseSymbol Asterisk >> return x) <|>return 1
     _ <- parseKeyword "INTEGER"
-    return $ DeclNode l s
+    return $ DeclNode "" s
 
 parseDefinition :: Parser Token Tree
 parseDefinition = do
-    l <- parseLabel
     _ <- parseKeyword "DC"
     s <- (parseOffset >>= \x -> parseSymbol Asterisk >> return x) <|>return 1
     _ <- parseKeyword "INTEGER"
     _ <- parseSymbol Oparen
     n <- parseOffset
     _ <- parseSymbol Cparen
-    return $ DefNode l s n
+    return $ DefNode "" s n
 
 parseArithmetic :: Parser Token Tree
 parseArithmetic = do
@@ -183,26 +188,77 @@ parseExpression = parseDeclaration <|> parseDefinition <|> parseArithmetic <|> p
 parseLine :: Parser Token Tree
 parseLine = do
     l <- parseLabel <|> return ""
-    c <- parseExpression <|> return Epsilon -- ! Unsafe way of handling trailing end-of-program labels
+    c <- parseExpression <|> return Epsilon -- ? Unsafe way of handling trailing end-of-program labels
     _ <- parseSymbol Newline
     n <- parseLine <|> return Epsilon
     return $ LineNode l c n
 
+-- DISTINGUISH MEMORY AND JUMP LABELS
+
+assignMemoryLabels :: Tree -> Tree
+assignMemoryLabels = \case
+    LineNode l (DeclNode "" s) next -> LineNode "" (DeclNode l s) (assignMemoryLabels next)
+    LineNode l (DefNode "" s v) next -> LineNode "" (DefNode l s v) (assignMemoryLabels next)
+    LineNode l n next-> LineNode l n (assignMemoryLabels next)
+    Epsilon -> Epsilon
+
 -- TRANSLATION
 
-encloseRuntime :: FilePath -> String
+encloseRuntime :: String -> String
 encloseRuntime prog = "#include <stdlib.h>\n\
 \#include <stdio.h>\n\
-\#define MEM_START 1000\n\
 \int main(void)\n{\n\
-\int* memory = (int*)calloc(1000, sizeof(int));\n\
-\int compare = 0;\n\
-\" ++ prog ++ "\nreturn 0;\n}\n"
+\int * memory = (int*)calloc(1000, sizeof(int));\n\
+\int * registers = (int*)calloc(16, sizeof(int));\n\
+\registers[14] = 1000; registers[15] = 2000;\n\
+\int flag = 0;\n\
+\" ++ prog ++ "\n\
+\printf(\"REGISTER DUMP:\\n\");\n\
+\for(int i = 0; i < 16; i++){printf(\"%d:\\t%d\\n\", i, registers[i]);}\n\
+\printf(\"MEMORY DUMP:\\n\");\n\
+\for(int i = 0; i < 1000; i++){if (memory[i] != 0) {printf(\"%d:\\t%d\\n\", 1000 + 4 * i, memory[i]);}}\n\
+\return 0;\n}\n"
+
+encloseForLoop :: Int -> String -> String
+encloseForLoop i s = "for(int i = 0; i < " ++ show i ++ "; i++){" ++ s ++"}\n"
 
 translate :: Tree -> String
-translate = \case
+translate = translate' 0
+
+translate' :: Int -> Tree -> String
+translate' i t = case t of
     Epsilon -> ""
-    (LineNode s t1 t2) -> (if null s then "" else s ++ ":;\n") ++ translate t1 ++ translate t2
+    LineNode s t1@(DeclNode _ size) t2 -> (if null s then "" else s ++ ":;\n") ++ translate' i t1 ++ translate' (i + size) t2
+    LineNode s t1@(DefNode _ size _) t2 -> (if null s then "" else s ++ ":;\n") ++ translate' i t1 ++ translate' (i + size) t2
+    LineNode s t1 t2 -> (if null s then "" else s ++ ":;\n") ++ translate' i t1 ++ translate' i t2
+    DeclNode n s -> "#define " ++ n ++ " " ++ show i ++ "\n"
+    DefNode n s v -> "#define " ++ n ++ " " ++ show i ++ "\n" ++ encloseForLoop s ("memory[i + " ++ show i ++ "] = " ++ show v ++ ";")
+    ArithmeticNode comm dest src -> case comm of
+        "LA" -> "registers[" ++ show dest ++ "] = " ++ (\(LabelNode s) -> s) src ++ " * 4 + 1000; // LA\n"
+        "ST" -> show src ++ " = registers[" ++ show dest ++ "]; // ST\n"
+        f | f `elem` ["L", "LR"] -> "registers[" ++ show dest ++ "] = " ++ show src ++ "; // " ++ f ++ "\n"
+        f | f `elem` ["A", "S", "M", "D", "AR", "SR", "MR", "DR"] -> let s = fromJust $ lookup f [("A", "+"), ("S", "-"), ("M", "*"), ("D", "/"), ("AR", "+"), ("SR", "-"), ("MR", "*"), ("DR", "/")] in "registers[" ++ show dest ++ "] " ++ s ++ "= " ++ show src ++ "; // " ++ f ++ "\n"
+        f | f `elem` ["C", "CR"] -> "flag = registers[" ++ show dest ++ "] - " ++ show src ++ "; // " ++ f ++ "\n"
+    JumpNode f label -> case f of
+        "J" -> "goto " ++ label ++ "; // J\n"
+        "JN" -> "if (flag < 0) {goto " ++ label ++ ";} // JN \n"
+        "JZ" -> "if (flag == 0) {goto " ++ label ++ ";} // JZ \n" 
+        "JP" -> "if (flag > 0) {goto " ++ label ++ ";} // JP \n" 
+
+test :: IO ()
+test = do
+    ast <- assignMemoryLabels . runParser parseLine <$> tokenizeFile "Programs/fibonacci.hpa"
+    -- print tree
+    printTree ast
+    -- generate C code
+    let generated_code = encloseRuntime . translate $ ast
+    putStrLn generated_code
+    -- write C code
+    writeFile "test.c" generated_code
+    -- compile C to machine code
+    callProcess "gcc" ["-O3", "-o", "test", "test.c"]
+    -- run compiled program
+    callProcess "./test" []
 
 -- ENTRY POINT
 
@@ -220,5 +276,5 @@ main = do
     mapM_ print tokens
 
     putStrLn "\nDrzewo parsowania: "
-    let tree = head . parse parseLine $ tokens
-    printTree . fst $ tree
+    let tree = assignMemoryLabels . runParser parseLine $ tokens
+    printTree tree
