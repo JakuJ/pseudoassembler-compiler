@@ -1,8 +1,13 @@
-module Parser where
+{-# LANGUAGE LambdaCase #-}
 
-import Control.Monad    
+module Parser (
+    Parser(Parser),
+    runParser,
+    parseSymbol
+) where
+
 import Control.Applicative
-import Data.Char
+import Control.Monad    
 
 newtype Parser from to = Parser {parse :: [from] -> [(to, [from])]}
 
@@ -33,3 +38,8 @@ runParser :: Parser from to -> [from] -> to
 runParser (Parser fun) toks = case fun toks of
     [(r, [])] -> r
     _ -> error "Parser couldn't consume entire stream"
+
+parseSymbol :: Eq a => a -> Parser a a
+parseSymbol x = Parser $ \case
+    (t:toks) -> [(t, toks) | t == x]
+    _ -> []

@@ -1,6 +1,6 @@
 {-# LANGUAGE LambdaCase #-}
 
-module HpaCompiler where
+module HpaCompiler () where
 
 import Data.Char (isSpace, isDigit, isUpper)
 import Control.Monad
@@ -8,9 +8,10 @@ import Control.Applicative
 import Data.List
 import Data.Maybe (fromJust)
 import System.Process (callProcess)
+import System.Environment (getArgs)
 import Parser
 
--- LEXING: First pass
+-- LEXING: First pass, "classical approach"
 -- Grouping text, number and symbol tokens
 
 data Lexeme = Text String
@@ -50,9 +51,9 @@ lexer [] _ = []
 lexer (c:_) ln = error $ "Syntax error on line " ++ show ln ++ ": invalid character '" ++ c : "'"
 
 pass1 :: String -> [(Lexeme, Int)]
-pass1 s = lexer s 1
+pass1 = (`lexer` 1)
 
--- LEXING: Second pass
+-- LEXING: Second pass (this can be done in one pass, but I do this for fun)
 -- annotating keywords, labels and symbols
 
 data Token  = Label String
@@ -84,15 +85,15 @@ lexer2 = \case
     Text s -> Label s
 
 pass2 :: [(Lexeme, Int)] -> [(Token, Int)]
-pass2 ls = (++ [(Newline, 0)]) . intercalate [(Newline, 0)] . groupBy (\(a,b) (c,d) ->b == d) $ [(lexer2 l, i) | (l, i) <- ls]
+pass2 ls = (++ [(Newline, 0)]) . intercalate [(Newline, 0)] . groupBy (\(a,b) (c,d) -> b == d) $ [(lexer2 l, i) | (l, i) <- ls]
 
--- PARSING
+-- PARSING (parsing combinators approach)
     
-data Tree =   LineNode String Tree Tree -- label, command or allocation, next line
-            | DeclNode String Int -- size
-            | DefNode String Int Int -- size, value
+data Tree =   LineNode String Tree Tree             -- label, command or allocation, next line
+            | DeclNode String Int                   -- size
+            | DefNode String Int Int                -- size, value
             | ArithmeticNode String Int AddressNode -- type, destination, source (label / absolute address / addressing register)
-            | JumpNode String String -- type, target
+            | JumpNode String String                -- type, target
             | Epsilon
                 deriving (Show)
                 
@@ -106,7 +107,8 @@ instance Show AddressNode where
     show (LabelNode s) = "memory[" ++ s ++ "]"
     show (AbsoluteNode i) = "memory[" ++ show ((i - 1000) `div` 4) ++ "]"
     show (RelativeNode off r) = "memory[(registers[" ++ show r ++ "] - 1000 + " ++ show (off `div` 4) ++ ") / 4]"
--- BASIC PARSERS
+
+-- PRIMITIVE PARSERS
 
 parseLabel :: Parser Token String
 parseLabel = Parser $ \case
@@ -121,11 +123,6 @@ parseKeyword s = Parser $ \case
 parseCommand :: Parser Token String
 parseCommand = Parser $ \case
     (Command s : toks) -> [(s, toks)]
-    _ -> []
-
-parseSymbol :: Token -> Parser Token Token
-parseSymbol s = Parser $ \case
-    (t:toks) -> [(t, toks) | t == s]
     _ -> []
 
 parseRegister :: Parser Token Int
@@ -188,12 +185,12 @@ parseExpression = parseDeclaration <|> parseDefinition <|> parseArithmetic <|> p
 parseLine :: Parser Token Tree
 parseLine = do
     l <- parseLabel <|> return ""
-    c <- parseExpression <|> return Epsilon -- ? Unsafe way of handling trailing end-of-program labels
+    c <- parseExpression <|> return Epsilon -- ? Unsafe ? way of handling trailing end-of-program labels
     _ <- parseSymbol Newline
     n <- parseLine <|> return Epsilon
     return $ LineNode l c n
 
--- DISTINGUISH MEMORY AND JUMP LABELS
+-- DISTINGUISH JUMP LABELS FROM MEMORY ALLOCATION ONES
 
 assignMemoryLabels :: Tree -> Tree
 assignMemoryLabels = \case
@@ -225,7 +222,7 @@ encloseForLoop i s = "for(int i = 0; i < " ++ show i ++ "; i++){" ++ s ++"}\n"
 translate :: Tree -> String
 translate = translate' 0
 
-translate' :: Int -> Tree -> String
+translate' :: Int -> Tree -> String -- ~spaghetti~
 translate' i t = case t of
     Epsilon -> ""
     LineNode s t1@(DeclNode _ size) t2 -> (if null s then "" else s ++ ":;\n") ++ translate' i t1 ++ translate' (i + size) t2
@@ -237,30 +234,17 @@ translate' i t = case t of
         "LA" -> "registers[" ++ show dest ++ "] = " ++ (\(LabelNode s) -> s) src ++ " * 4 + 1000; // LA\n"
         "ST" -> show src ++ " = registers[" ++ show dest ++ "]; // ST\n"
         f | f `elem` ["L", "LR"] -> "registers[" ++ show dest ++ "] = " ++ show src ++ "; // " ++ f ++ "\n"
-        f | f `elem` ["A", "S", "M", "D", "AR", "SR", "MR", "DR"] -> let s = fromJust $ lookup f [("A", "+"), ("S", "-"), ("M", "*"), ("D", "/"), ("AR", "+"), ("SR", "-"), ("MR", "*"), ("DR", "/")] in "registers[" ++ show dest ++ "] " ++ s ++ "= " ++ show src ++ "; // " ++ f ++ "\n"
+        f | f `elem` ["A", "S", "M", "D", "AR", "SR", "MR", "DR"] ->
+            let s = fromJust $ lookup f [("A", "+"), ("S", "-"), ("M", "*"), ("D", "/"), ("AR", "+"), ("SR", "-"), ("MR", "*"), ("DR", "/")] in 
+                "registers[" ++ show dest ++ "] " ++ s ++ "= " ++ show src ++ "; // " ++ f ++ "\n"
         f | f `elem` ["C", "CR"] -> "flag = registers[" ++ show dest ++ "] - " ++ show src ++ "; // " ++ f ++ "\n"
     JumpNode f label -> case f of
         "J" -> "goto " ++ label ++ "; // J\n"
         "JN" -> "if (flag < 0) {goto " ++ label ++ ";} // JN \n"
         "JZ" -> "if (flag == 0) {goto " ++ label ++ ";} // JZ \n" 
-        "JP" -> "if (flag > 0) {goto " ++ label ++ ";} // JP \n" 
+        "JP" -> "if (flag > 0) {goto " ++ label ++ ";} // JP \n"
 
-test :: IO ()
-test = do
-    ast <- assignMemoryLabels . runParser parseLine <$> tokenizeFile "Programs/fibonacci.hpa"
-    -- print tree
-    printTree ast
-    -- generate C code
-    let generated_code = encloseRuntime . translate $ ast
-    putStrLn generated_code
-    -- write C code
-    writeFile "test.c" generated_code
-    -- compile C to machine code
-    callProcess "gcc" ["-O3", "-o", "test", "test.c"]
-    -- run compiled program
-    callProcess "./test" []
-
--- ENTRY POINT
+-- HELPER FUNCTIONS
 
 tokenizeFile :: FilePath -> IO [Token]
 tokenizeFile path = map fst . pass2 . pass1 <$> readFile path
@@ -269,12 +253,19 @@ printTree :: Tree -> IO ()
 printTree Epsilon = return ()
 printTree (LineNode l c nl) = putStrLn (show l ++ "\t" ++ show c) >> printTree nl
 
-main :: IO ()
-main = do
-    tokens <- tokenizeFile "Programs/domowa.hpa"
-    putStrLn "Kod po tokenizacji:"
-    mapM_ print tokens
+-- ENTRY POINT
 
-    putStrLn "\nDrzewo parsowania: "
-    let tree = assignMemoryLabels . runParser parseLine $ tokens
-    printTree tree
+main :: IO () -- TODO: Make some user interface (getArgs), test all sample programs
+main = do
+    -- make an AST
+    ast <- assignMemoryLabels . runParser parseLine <$> tokenizeFile "Programs/fibonacci.hpa"
+    printTree ast
+    -- generate C code
+    let generated_code = encloseRuntime . translate $ ast
+    putStrLn generated_code
+    -- write C code to file
+    writeFile "test.c" generated_code
+    -- compile C to machine code
+    callProcess "gcc" ["-O3", "-o", "test", "test.c"]
+    -- run compiled program
+    callProcess "./test" []

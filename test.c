@@ -13,7 +13,7 @@ for(int i = 0; i < 1; i++){memory[i + 1] = 1;}
 #define TABB 2
 for(int i = 0; i < 1; i++){memory[i + 2] = 1;}
 #define TABC 3
-for(int i = 0; i < 1; i++){memory[i + 3] = 7;}
+for(int i = 0; i < 1; i++){memory[i + 3] = 2;}
 #define TABD 4
 for(int i = 0; i < 1; i++){memory[i + 4] = 3;}
 #define TABE 5
@@ -21,7 +21,7 @@ for(int i = 0; i < 1; i++){memory[i + 5] = 5;}
 #define TABF 6
 for(int i = 0; i < 1; i++){memory[i + 6] = 8;}
 #define TABG 7
-for(int i = 0; i < 1; i++){memory[i + 7] = 14;}
+for(int i = 0; i < 1; i++){memory[i + 7] = 13;}
 #define TABH 8
 for(int i = 0; i < 1; i++){memory[i + 8] = 21;}
 #define TABI 9
