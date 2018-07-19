@@ -1,6 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
-module HpaCompiler () where
+module Main (main) where
 
 import Data.Char (isSpace, isDigit, isUpper)
 import Control.Monad
@@ -8,7 +9,8 @@ import Control.Applicative
 import Data.List
 import Data.Maybe (fromJust)
 import System.Process (callProcess)
-import System.Environment (getArgs)
+import System.Environment (getArgs, getProgName)
+import Control.Exception
 import Parser
 
 -- LEXING: First pass, "classical approach"
@@ -26,13 +28,14 @@ isNewLine, isSymbol, isIdentificator :: Char -> Bool
 isNewLine = (== '\n')
 isSymbol = (`elem` symbols)
 isIdentificator x = isUpper x || x == '_'
+isNumber x = isDigit x || x == '-'
 
 lexer :: String -> Int -> [(Lexeme, Int)]
 lexer (c:cs) ln
     | isNewLine c = lexer cs (ln + 1)
     | isSpace c = lexer cs ln
     | isSymbol c = (Symbol c, ln) : lexer cs ln
-    | isDigit c = (Number (read (c : numbers) :: Int), ln) : lexer next ln
+    | isNumber c = (Number (read (c : numbers) :: Int), ln) : lexer next ln
         where
             numbers = takeWhile isDigit cs
             next = dropWhile isDigit cs
@@ -106,7 +109,7 @@ instance Show AddressNode where
     show (RegisterNode i) = "registers[" ++ show i ++ "]"
     show (LabelNode s) = "memory[" ++ s ++ "]"
     show (AbsoluteNode i) = "memory[" ++ show ((i - 1000) `div` 4) ++ "]"
-    show (RelativeNode off r) = "memory[(registers[" ++ show r ++ "] - 1000 + " ++ show (off `div` 4) ++ ") / 4]"
+    show (RelativeNode off r) = "memory[(registers[" ++ show r ++ "] - 1000 + " ++ show off ++ ") / 4]"
 
 -- PRIMITIVE PARSERS
 
@@ -246,8 +249,8 @@ translate' i t = case t of
 
 -- HELPER FUNCTIONS
 
-tokenizeFile :: FilePath -> IO [Token]
-tokenizeFile path = map fst . pass2 . pass1 <$> readFile path
+tokenizeFile :: String -> [Token]
+tokenizeFile = map fst . pass2 . pass1
 
 printTree :: Tree -> IO ()
 printTree Epsilon = return ()
@@ -255,17 +258,30 @@ printTree (LineNode l c nl) = putStrLn (show l ++ "\t" ++ show c) >> printTree n
 
 -- ENTRY POINT
 
-main :: IO () -- TODO: Make some user interface (getArgs), test all sample programs
-main = do
-    -- make an AST
-    ast <- assignMemoryLabels . runParser parseLine <$> tokenizeFile "Programs/fibonacci.hpa"
-    printTree ast
-    -- generate C code
+main :: IO () -- TODO: test all sample programs
+main = catch (do
+    -- interface
+    args' <- getArgs
+    let sourceName = last args'
+    let args = init args'
+    source <- readFile sourceName
+    let programName = takeWhile (/='.') sourceName
+    -- make an AST and generate C code
+    let tokens = tokenizeFile source
+    when ("-v" `elem` args) $ mapM_ print tokens
+    let ast =  assignMemoryLabels . runParser parseLine $ tokens
+    when ("-v" `elem` args) $ printTree ast
     let generated_code = encloseRuntime . translate $ ast
-    putStrLn generated_code
     -- write C code to file
-    writeFile "test.c" generated_code
+    let execName = if "-o" `elem` args then dropWhile (/="-o") args !! 1 else programName ++ ".out"
+    writeFile (programName ++ ".c") generated_code
     -- compile C to machine code
-    callProcess "gcc" ["-O3", "-o", "test", "test.c"]
+    callProcess "gcc" ["-O3", "-o", execName, programName ++ ".c"]
+    -- remove C file
+    unless ("-S" `elem` args) $ callProcess "rm" [programName ++ ".c"]
     -- run compiled program
     callProcess "./test" []
+        ) $ \(err :: SomeException) -> do
+                print err
+                name <- getProgName
+                putStrLn $ "\nUsage:\n\t" ++ name ++ " [-o output] [-S] source"
