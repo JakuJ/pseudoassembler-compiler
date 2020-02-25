@@ -1,0 +1,25 @@
+JEDEN   DC INTEGER (1)
+CZTERY  DC INTEGER (4)
+STO     DC INTEGER (100)
+WEKTOR  DC 100*INTEGER (7)
+SUMA    DS INTEGER
+MINUS   DC INTEGER (-5)
+
+L       1, JEDEN
+SR      1, 1
+LR      3, 1
+LR      4, 1
+LA      5, WEKTOR
+L       7, MINUS
+ST      7, 12(5)
+
+POCZATEK        C       1, 0(5)
+                JZ      ETYKIETA
+                JP      ETYKIETA
+                A       4, 0(5)
+ETYKIETA        A       5, CZTERY
+                A       3, JEDEN
+                C       3, STO
+                JZ      KONIEC_PROGRAMU
+                J       POCZATEK
+KONIEC_PROGRAMU ST      4, SUMA
